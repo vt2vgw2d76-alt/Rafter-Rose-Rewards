@@ -12,4 +12,34 @@
 header.home-header {
   text-align: center;
 }
-</style></head><body><header><small>RAFTER & ROSE</small><h1>It's the little things.</h1></header><nav class="tabs" id="tabs"><button data-tab="rewards" class="active">My rewards</button><button data-tab="events">Events</button><button data-tab="cakes">Cake orders</button><button data-tab="hire">Private hire</button><button data-tab="staff">Staff demo</button></nav><main id="view"></main><footer>Rafter & Rose · Prototype only · No real customer data or rewards</footer><script src="app.js"></script><script>if("serviceWorker" in navigator)navigator.serviceWorker.register("./sw.js").catch(()=>{});</script></body></html>
+</style></head><body>
+<header class="home-header" id="app-header">
+  <img
+    class="home-logo"
+    src="assets/images/logo%20-%20transparent.png"
+    alt="Rafter & Rose"
+  >
+  <h1>It's the little things.</h1>
+</header><nav class="tabs" id="tabs"><button data-tab="rewards" class="active">My rewards</button><button data-tab="events">Events</button><button data-tab="cakes">Cake orders</button><button data-tab="hire">Private hire</button><button data-tab="staff">Staff demo</button></nav><main id="view"></main><footer>Rafter & Rose · Prototype only · No real customer data or rewards</footer>
+<script>
+  function updateHomeLogo() {
+    const activeTab = document.querySelector(
+      '.tabs button.active'
+    );
+    const isHome = activeTab?.dataset.tab === 'rewards';
+
+    document.getElementById('app-header')
+      .classList.toggle('home-header', isHome);
+
+    document.querySelector('.home-logo')
+      .style.display = isHome ? 'block' : 'none';
+  }
+
+  document.getElementById('tabs')
+    .addEventListener('click', () => {
+      requestAnimationFrame(updateHomeLogo);
+    });
+
+  updateHomeLogo();
+</script>
+<script src="app.js"></script><script>if("serviceWorker" in navigator)navigator.serviceWorker.register("./sw.js").catch(()=>{});</script></body></html>
