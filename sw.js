@@ -1,5 +1,5 @@
 
-const CACHE = 'rr-rewards-live-v1';
+const CACHE = 'rr-rewards-live-v2';
 
 const ASSETS = [
   './',
