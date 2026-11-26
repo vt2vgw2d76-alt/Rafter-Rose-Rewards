@@ -2,8 +2,8 @@
 const SUPABASE_URL =
   "https://wufsozpzqnfekctvudfo.supabase.co";
 
-const SUPABASE_KEY = "sb_publishable_UkwW-P2AMMOIUkNKwoO9DQ_bpdMTa1Q";
-
+const SUPABASE_KEY =
+  "sb_publishable_UkwW-P2AMMOIUkNKwoO9DQ_bpdMTa1Q";
 
 const db = window.supabase.createClient(
   SUPABASE_URL,
@@ -23,6 +23,8 @@ let isStaff = false;
 let scanner = null;
 let customer = null;
 let busy = false;
+let activeCode = null;
+let codeTimer = null;
 
 const money = cents =>
   "$" + (Number(cents) / 100).toFixed(2);
@@ -54,9 +56,35 @@ function pendingKey() {
 }
 
 function getPending() {
-  return JSON.parse(
+  const pending = JSON.parse(
     localStorage.getItem(pendingKey()) || "null"
   );
+
+  if (pending && (
+    !uuidPattern.test(pending.p_customer_id) ||
+    !uuidPattern.test(pending.p_transaction_id) ||
+    !Number.isInteger(pending.p_purchase_cents) ||
+    !Number.isInteger(pending.p_redeemed_cents) ||
+    pending.p_purchase_cents <= 0 ||
+    pending.p_redeemed_cents < 0 ||
+    pending.p_redeemed_cents >
+      pending.p_purchase_cents
+  )) {
+    throw new Error("Invalid pending transaction.");
+  }
+
+  return pending;
+}
+
+function clearRedemptionCode() {
+  clearInterval(codeTimer);
+  codeTimer = null;
+  activeCode = null;
+
+  const display =
+    document.getElementById("redemptiondisplay");
+
+  if (display) display.textContent = "";
 }
 
 async function stopScanner() {
@@ -255,19 +283,15 @@ async function showRewards() {
       wallet.error ||
       history.error) {
 
-    console.error(
-      profile.error,
-      wallet.error,
-      history.error
-    );
-
     view.innerHTML = `
       <section class="card">
         <h2>Rewards unavailable</h2>
+
         <p>We couldn't load your account.
         Please try again.</p>
 
         <button id="retry">Try again</button>
+
         <button class="secondary" id="signout">
           Sign out
         </button>
@@ -299,6 +323,7 @@ async function showRewards() {
 
     <section class="card"
       style="text-align:center">
+
       <h2>Your rewards card</h2>
 
       <div id="customerqr"
@@ -308,23 +333,53 @@ async function showRewards() {
       </div>
 
       <p class="muted">
-        Show your code at the counter
-        to earn or redeem rewards.
+        Show your rewards card at the counter
+        whenever you make a purchase.
       </p>
 
       <details>
         <summary class="muted">
           Show manual customer code
         </summary>
+
         <p class="mini"
           style="overflow-wrap:anywhere">
           ${esc(userId)}
         </p>
+
         <button id="copycode"
           class="secondary">
           Copy code
         </button>
       </details>
+    </section>
+
+    <section class="card"
+      style="text-align:center">
+
+      <h2>Redeem your rewards</h2>
+
+      <p class="muted">
+        Generate a secure code when you're
+        ready to spend your reward dollars.
+      </p>
+
+      <button class="bigbtn"
+        id="generatecode"
+        ${wallet.data.balance_cents <= 0
+          ? "disabled" : ""}>
+        Redeem my rewards
+      </button>
+
+      ${wallet.data.balance_cents <= 0
+        ? `<p class="muted">
+            You don't have any rewards
+            available to redeem yet.
+           </p>`
+        : ""}
+
+      <div id="redemptiondisplay"
+        role="status"></div>
     </section>
 
     <section class="card">
@@ -341,9 +396,7 @@ async function showRewards() {
 
           <div class="row">
             <span>Purchase</span>
-            <span>
-              ${money(t.purchase_cents)}
-            </span>
+            <span>${money(t.purchase_cents)}</span>
           </div>
 
           <div class="row">
@@ -355,9 +408,7 @@ async function showRewards() {
 
           <div class="row">
             <span>Rewards redeemed</span>
-            <span>
-              ${money(t.redeemed_cents)}
-            </span>
+            <span>${money(t.redeemed_cents)}</span>
           </div>
 
           <hr class="divider">
@@ -401,17 +452,170 @@ async function showRewards() {
     .onclick = async () => {
       try {
         await navigator.clipboard.writeText(userId);
-        document.getElementById("copycode")
-          .textContent = "Copied!";
+
+        const button =
+          document.getElementById("copycode");
+
+        if (button) button.textContent = "Copied!";
       } catch (error) {
         alert("Please copy the code manually.");
       }
     };
 
+  document.getElementById("generatecode")
+    .onclick = generateRedemptionCode;
+
   document.getElementById("refresh")
     .onclick = render;
 
+  if (activeCode?.userId === userId &&
+      activeCode.expires > Date.now()) {
+    displayRedemptionCode();
+  }
+
   wireSignout();
+}
+
+async function generateRedemptionCode() {
+  const button =
+    document.getElementById("generatecode");
+  const display =
+    document.getElementById("redemptiondisplay");
+
+  const userId = currentUser?.id;
+  const version = renderVersion;
+
+  if (!userId || button.disabled) return;
+
+  button.disabled = true;
+  display.textContent = "Generating your code...";
+
+  try {
+    const { data, error } = await db.rpc(
+      "generate_redemption_code"
+    );
+
+    if (version !== renderVersion ||
+        currentUser?.id !== userId) return;
+
+    if (error || data?.success !== true) {
+      throw new Error(
+        error?.message ||
+        data?.error ||
+        "Unable to generate code."
+      );
+    }
+
+    const expires =
+      new Date(data.expires_at).getTime();
+
+    if (!/^[0-9]{6}$/.test(data.code) ||
+        !Number.isFinite(expires)) {
+      throw new Error("Invalid redemption response.");
+    }
+
+    activeCode = {
+      userId,
+      code: data.code,
+      expires
+    };
+
+    displayRedemptionCode();
+
+  } catch (error) {
+    if (version !== renderVersion ||
+        currentUser?.id !== userId) return;
+
+    display.textContent = error.message;
+    button.disabled = false;
+  }
+}
+
+function displayRedemptionCode() {
+  clearInterval(codeTimer);
+
+  const display =
+    document.getElementById("redemptiondisplay");
+
+  const button =
+    document.getElementById("generatecode");
+
+  if (!display || !button || !activeCode) return;
+
+  const code = activeCode;
+
+  button.disabled = true;
+
+  display.innerHTML = `
+    <div style="
+      margin-top:20px;
+      padding:20px;
+      background:#f8f4ec;
+      border-radius:12px">
+
+      <p>Your redemption code</p>
+
+      <div style="
+        font-size:38px;
+        font-weight:700;
+        letter-spacing:6px;
+        color:#293f34">
+        ${esc(code.code)}
+      </div>
+
+      <p id="codecountdown"
+        class="muted"></p>
+
+      <p class="muted">
+        Show this code to your barista only
+        when you're ready to redeem rewards.
+        Confirm the amount being redeemed.
+      </p>
+
+      <small>
+        Valid for one redemption only.
+      </small>
+    </div>
+  `;
+
+  const countdown =
+    document.getElementById("codecountdown");
+
+  const tick = () => {
+    if (!display.isConnected ||
+        currentUser?.id !== code.userId ||
+        activeCode !== code) {
+      clearInterval(codeTimer);
+      codeTimer = null;
+      return;
+    }
+
+    const seconds = Math.max(
+      0,
+      Math.ceil(
+        (code.expires - Date.now()) / 1000
+      )
+    );
+
+    if (seconds === 0) {
+      clearRedemptionCode();
+
+      display.textContent =
+        "Your redemption code has expired.";
+
+      button.disabled = false;
+      return;
+    }
+
+    countdown.textContent =
+      "Expires in " +
+      Math.floor(seconds / 60) +
+      ":" +
+      String(seconds % 60).padStart(2, "0");
+  };
+
+  codeTimer = setInterval(tick, 1000);
+  tick();
 }
 
 async function showStaff() {
@@ -432,8 +636,7 @@ async function showStaff() {
     <section class="card">
       <h2>Find customer</h2>
 
-      <button id="scan"
-        class="bigbtn">
+      <button id="scan" class="bigbtn">
         Open QR scanner
       </button>
 
@@ -446,6 +649,7 @@ async function showStaff() {
       </button>
 
       <label>Manual customer code</label>
+
       <input id="manualcode"
         placeholder="Paste customer code"
         autocomplete="off">
@@ -476,15 +680,14 @@ async function showStaff() {
   } catch (error) {
     document.getElementById("checkout")
       .textContent =
-        "Transaction storage unavailable. Do not process payments.";
+        "Transaction storage unavailable. Ask a manager.";
+
     document.getElementById("scan").disabled = true;
     document.getElementById("lookup").disabled = true;
     return;
   }
 
   if (pending) {
-    document.getElementById("scan").disabled = true;
-    document.getElementById("lookup").disabled = true;
     showPending(pending);
     return;
   }
@@ -495,9 +698,13 @@ async function showStaff() {
   document.getElementById("stopscan")
     .onclick = async () => {
       await stopScanner();
+
       document.getElementById("stopscan")
         ?.classList.add("hidden");
-      const button = document.getElementById("scan");
+
+      const button =
+        document.getElementById("scan");
+
       if (button) button.disabled = false;
     };
 
@@ -512,9 +719,18 @@ async function showStaff() {
 async function startScanner() {
   if (scanner || busy || !isStaff) return;
 
+  try {
+    if (getPending()) return;
+  } catch (error) {
+    alert("Transaction storage unavailable.");
+    return;
+  }
+
   const version = renderVersion;
+
   const message =
     document.getElementById("staffmessage");
+
   const button =
     document.getElementById("scan");
 
@@ -562,7 +778,7 @@ async function startScanner() {
     if (version !== renderVersion) return;
 
     message.textContent =
-      "Camera unavailable. Check camera permissions or enter the customer code manually.";
+      "Camera unavailable. Check permissions or enter the customer code manually.";
 
     button.disabled = false;
   }
@@ -584,9 +800,15 @@ async function lookupCustomer(raw) {
     return;
   }
 
-  if (getPending()) {
+  try {
+    if (getPending()) {
+      message.textContent =
+        "Resolve the previous transaction first.";
+      return;
+    }
+  } catch (error) {
     message.textContent =
-      "Resolve the previous transaction first.";
+      "Transaction storage unavailable.";
     return;
   }
 
@@ -618,11 +840,13 @@ async function lookupCustomer(raw) {
 
     customer = data;
     message.textContent = "Customer found.";
+
     showCheckout();
 
   } catch (error) {
     message.textContent =
       "Unable to load customer. Try again.";
+
   } finally {
     busy = false;
 
@@ -632,6 +856,10 @@ async function lookupCustomer(raw) {
 
       document.getElementById("stopscan")
         .classList.add("hidden");
+
+      if (document.getElementById("confirm")) {
+        calculateCheckout();
+      }
     }
   }
 }
@@ -652,25 +880,47 @@ function showCheckout() {
       </div>
 
       <label>Eligible purchase total ($)</label>
+
       <input id="purchase"
-        type="number"
-        inputmode="decimal"
-        min="0.01"
-        step="0.01"
+        type="number" inputmode="decimal"
+        min="0.01" step="0.01"
         placeholder="0.00">
 
       <label>Rewards to redeem ($)</label>
+
       <input id="redeem"
-        type="number"
-        inputmode="decimal"
-        min="0"
-        step="0.01"
+        type="number" inputmode="decimal"
+        min="0" step="0.01"
         value="0.00">
 
       <button id="maxredeem"
         class="secondary bigbtn">
         Use maximum available rewards
       </button>
+
+      <div id="redemptionfield" hidden
+        style="margin-top:15px">
+
+        <div class="notice">
+          Ask the customer to generate
+          a redemption code and confirm
+          the amount being redeemed.
+        </div>
+
+        <label>Customer redemption code</label>
+
+        <input id="redemptioncode"
+          type="text"
+          inputmode="numeric"
+          maxlength="6"
+          autocomplete="off"
+          placeholder="6-digit code">
+
+        <p class="muted">
+          Codes expire after two minutes
+          and can only be used once.
+        </p>
+      </div>
 
       <hr class="divider">
 
@@ -691,6 +941,14 @@ function showCheckout() {
 
   document.getElementById("redeem")
     .oninput = calculateCheckout;
+
+  document.getElementById("redemptioncode")
+    .oninput = event => {
+      event.target.value = event.target.value
+        .replace(/\D/g, "").slice(0, 6);
+
+      calculateCheckout();
+    };
 
   document.getElementById("maxredeem")
     .onclick = () => {
@@ -758,7 +1016,28 @@ function calculateCheckout() {
   const button =
     document.getElementById("confirm");
 
-  button.disabled = !amounts || busy;
+  const field =
+    document.getElementById("redemptionfield");
+
+  const codeInput =
+    document.getElementById("redemptioncode");
+
+  const redeemed = toCents(
+    document.getElementById("redeem").value
+  );
+
+  const needsCode = redeemed > 0;
+
+  field.hidden = !needsCode;
+
+  if (!needsCode) codeInput.value = "";
+
+  const validCode =
+    !needsCode ||
+    /^[0-9]{6}$/.test(codeInput.value);
+
+  button.disabled =
+    !amounts || !validCode || busy;
 
   if (!amounts) {
     calculation.innerHTML = `
@@ -789,6 +1068,13 @@ function calculateCheckout() {
       <strong>${money(amounts.balance)}</strong>
     </div>
 
+    ${needsCode && !validCode
+      ? `<p class="muted">
+          Enter the customer's six-digit
+          redemption code to continue.
+         </p>`
+      : ""}
+
     <p class="muted">
       Confirm only after the corresponding
       payment or redemption is completed
@@ -802,13 +1088,33 @@ async function submitTransaction() {
 
   const amounts = checkoutAmounts();
 
-  if (!amounts || getPending()) return;
+  if (!amounts) return;
+
+  const code = amounts.redeemed > 0
+    ? document.getElementById(
+        "redemptioncode"
+      ).value.trim()
+    : null;
+
+  if (amounts.redeemed > 0 &&
+      !/^[0-9]{6}$/.test(code)) return;
+
+  try {
+    if (getPending()) {
+      showPending(getPending());
+      return;
+    }
+  } catch (error) {
+    alert("Transaction storage unavailable.");
+    return;
+  }
 
   const approved = window.confirm(
     "Confirm rewards transaction?\n\n" +
     "Purchase: " + money(amounts.purchase) +
     "\nRedeemed: " + money(amounts.redeemed) +
-    "\nPaid: " + money(amounts.paid)
+    "\nPaid: " + money(amounts.paid) +
+    "\n\nConfirm the corresponding Lightspeed payment."
   );
 
   if (!approved) return;
@@ -826,27 +1132,51 @@ async function submitTransaction() {
       JSON.stringify(pending)
     );
   } catch (error) {
-    alert("Unable to save transaction reference. Do not proceed.");
+    alert(
+      "Unable to save transaction reference. Do not proceed."
+    );
     return;
   }
 
-  await processPending(pending);
+  document.getElementById(
+    "redemptioncode"
+  ).value = "";
+
+  await processPending(pending, code);
 }
 
-function showPending(pending, errorMessage = "") {
+function showPending(
+  pending,
+  errorMessage = "",
+  confirmedRejection = false
+) {
+  document.getElementById("scan")
+    ?.setAttribute("disabled", "");
+
+  document.getElementById("lookup")
+    ?.setAttribute("disabled", "");
+
+  document.getElementById("manualcode")
+    ?.setAttribute("disabled", "");
+
+  const needsCode = pending.p_redeemed_cents > 0;
+
   document.getElementById("checkout")
     .innerHTML = `
       <section class="card">
-        <h2>Pending transaction</h2>
 
-        <p>
-          A previous transaction has not
-          been confirmed by the app.
-        </p>
+        <h2>${confirmedRejection
+          ? "Transaction not completed"
+          : "Pending transaction"}</h2>
+
+        <p>${confirmedRejection
+          ? "Supabase rejected this attempt. No rewards were changed by this attempt."
+          : "The app has not received confirmation of this transaction."}</p>
 
         <div class="notice">
-          Do not create a new transaction
-          for this purchase.
+          Do not create a new rewards
+          transaction or repeat the Lightspeed
+          payment for this purchase.
         </div>
 
         <p>Purchase:
@@ -855,41 +1185,249 @@ function showPending(pending, errorMessage = "") {
         <p>Redeemed:
           ${money(pending.p_redeemed_cents)}</p>
 
+        <p>Amount paid:
+          ${money(
+            pending.p_purchase_cents -
+            pending.p_redeemed_cents
+          )}</p>
+
         <p class="mini"
           style="overflow-wrap:anywhere">
           Reference:
           ${esc(pending.p_transaction_id)}
         </p>
 
-        <p class="muted">
+        <p class="muted" role="status">
           ${esc(errorMessage)}
         </p>
 
+        <button class="secondary bigbtn"
+          id="checkpending">
+          Check previous transaction
+        </button>
+
+        ${needsCode ? `
+          <label>Customer redemption code</label>
+
+          <input id="retrycode"
+            type="text"
+            inputmode="numeric"
+            maxlength="6"
+            autocomplete="off"
+            placeholder="6-digit code">
+
+          <p class="muted">
+            If the previous attempt did not
+            complete, ask the customer for
+            a valid redemption code.
+          </p>
+        ` : ""}
+
         <button class="bigbtn"
-          id="retrypending">
+          id="retrypending"
+          ${needsCode ? "disabled" : ""}>
           Retry same transaction
         </button>
 
+        <p id="pendingmessage"
+          class="muted" role="status"></p>
+
         <p class="muted">
-          If the transaction was already
-          processed, ask a manager to verify
-          the original reference before
-          proceeding.
+          If this transaction cannot be
+          resolved, ask a manager to review
+          its reference before proceeding.
         </p>
       </section>
     `;
 
+  document.getElementById("checkpending")
+    .onclick = () => checkPending(pending);
+
+  if (needsCode) {
+    document.getElementById("retrycode")
+      .oninput = event => {
+        event.target.value = event.target.value
+          .replace(/\D/g, "").slice(0, 6);
+
+        document.getElementById("retrypending")
+          .disabled =
+            !/^[0-9]{6}$/.test(
+              event.target.value
+            ) || busy;
+      };
+  }
+
   document.getElementById("retrypending")
-    .onclick = () => processPending(pending);
+    .onclick = () => {
+      const input =
+        document.getElementById("retrycode");
+
+      const code = input?.value.trim() || null;
+
+      if (needsCode &&
+          !/^[0-9]{6}$/.test(code || "")) return;
+
+      if (input) input.value = "";
+
+      if (!window.confirm(
+        "Retry the original rewards transaction? Do not repeat the Lightspeed payment."
+      )) return;
+
+      processPending(pending, code);
+    };
 }
 
-async function processPending(pending) {
+async function checkPending(pending) {
+  if (busy || !currentUser || !isStaff) return;
+
+  busy = true;
+
+  const version = renderVersion;
+  const userId = currentUser.id;
+  const key = pendingKey();
+
+  const message =
+    document.getElementById("pendingmessage");
+
+  const button =
+    document.getElementById("checkpending");
+
+  const retry =
+    document.getElementById("retrypending");
+
+  button.disabled = true;
+  retry.disabled = true;
+
+  message.textContent =
+    "Checking the original reference...";
+
+  try {
+    const { data, error } = await db
+      .from("loyalty_transactions")
+      .select(
+        "id,customer_id,staff_id,purchase_cents,redeemed_cents,earned_cents,balance_after_cents"
+      )
+      .eq("id", pending.p_transaction_id)
+      .maybeSingle();
+
+    if (version !== renderVersion ||
+        currentUser?.id !== userId) return;
+
+    if (error) throw new Error(error.message);
+
+    if (!data) {
+      message.textContent =
+        "No completed transaction found. This does not rule out a request still being processed. Use the original reference when retrying.";
+      return;
+    }
+
+    if (
+      data.customer_id !== pending.p_customer_id ||
+      data.staff_id !== userId ||
+      data.purchase_cents !==
+        pending.p_purchase_cents ||
+      data.redeemed_cents !==
+        pending.p_redeemed_cents
+    ) {
+      message.textContent =
+        "Transaction details do not match. Ask a manager.";
+      return;
+    }
+
+    localStorage.removeItem(key);
+
+    showTransactionSuccess({
+      earned_cents: data.earned_cents,
+      redeemed_cents: data.redeemed_cents,
+      balance_cents: data.balance_after_cents,
+      already_processed: true
+    });
+
+  } catch (error) {
+    if (version === renderVersion) {
+      message.textContent =
+        "Unable to verify transaction. " +
+        error.message;
+    }
+  } finally {
+    busy = false;
+
+    if (button.isConnected) {
+      button.disabled = false;
+
+      const code =
+        document.getElementById("retrycode");
+
+      retry.disabled =
+        pending.p_redeemed_cents > 0 &&
+        !/^[0-9]{6}$/.test(
+          code?.value || ""
+        );
+    }
+  }
+}
+
+function showTransactionSuccess(data) {
+  view.innerHTML = `
+    <section class="card">
+
+      <div class="notice good">
+        Rewards transaction completed
+      </div>
+
+      <h2>All done!</h2>
+
+      ${data.already_processed
+        ? `<p class="muted">
+            Original transaction recovered.
+            No duplicate rewards were awarded.
+           </p>`
+        : ""}
+
+      <p>Rewards earned:
+        ${money(data.earned_cents)}</p>
+
+      <p>Rewards redeemed:
+        ${money(data.redeemed_cents)}</p>
+
+      <p>Balance after this transaction:
+        <strong>${money(data.balance_cents)}</strong>
+      </p>
+
+      <p class="muted">
+        Customer can refresh their balance
+        to view their latest rewards.
+      </p>
+
+      <button id="nextcustomer"
+        class="bigbtn">
+        Next customer
+      </button>
+
+      <button id="signout"
+        class="secondary bigbtn">
+        Sign out
+      </button>
+    </section>
+  `;
+
+  document.getElementById("nextcustomer")
+    .onclick = render;
+
+  wireSignout();
+}
+
+async function processPending(
+  pending,
+  redemptionCode = null
+) {
   if (busy || !isStaff || !currentUser) return;
 
   busy = true;
 
   const key = pendingKey();
   const version = renderVersion;
+  const userId = currentUser.id;
 
   document.querySelectorAll(
     "button, input"
@@ -902,98 +1440,125 @@ async function processPending(pending) {
 
     const { data, error } = await db.rpc(
       "process_loyalty_transaction",
-      pending
+      {
+        ...pending,
+        p_redemption_code: redemptionCode
+      }
     );
+
+    redemptionCode = null;
+
+    if (version !== renderVersion ||
+        currentUser?.id !== userId) return;
 
     if (error || !data) {
       throw new Error(
-        error?.message || "No confirmation received."
+        error?.message ||
+        "No confirmation received."
+      );
+    }
+
+    if (data.success === false) {
+      let message =
+        data.error || "Transaction rejected.";
+
+      if (Number.isInteger(
+        data.attempts_remaining
+      )) {
+        message +=
+          " Attempts remaining: " +
+          data.attempts_remaining + ".";
+      }
+
+      showPending(pending, message, true);
+      return;
+    }
+
+    if (data.success !== true ||
+        data.transaction_id !==
+          pending.p_transaction_id ||
+        data.purchase_cents !==
+          pending.p_purchase_cents ||
+        data.redeemed_cents !==
+          pending.p_redeemed_cents) {
+      throw new Error(
+        "Unexpected transaction response."
       );
     }
 
     localStorage.removeItem(key);
 
-    if (version !== renderVersion) return;
-
-    view.innerHTML = `
-      <section class="card">
-        <div class="notice good">
-          Rewards transaction completed
-        </div>
-
-        <h2>All done!</h2>
-
-        <p>Rewards earned:
-          ${money(data.earned_cents)}</p>
-
-        <p>Rewards redeemed:
-          ${money(data.redeemed_cents)}</p>
-
-        <p class="muted">
-          Customer can refresh their balance
-          to view the updated rewards.
-        </p>
-
-        <button id="nextcustomer"
-          class="bigbtn">
-          Next customer
-        </button>
-
-        <button id="signout"
-          class="secondary bigbtn">
-          Sign out
-        </button>
-      </section>
-    `;
-
-    document.getElementById("nextcustomer")
-      .onclick = render;
-
-    wireSignout();
+    showTransactionSuccess(data);
 
   } catch (error) {
-    if (version === renderVersion) {
+    if (version === renderVersion &&
+        currentUser?.id === userId) {
       showPending(pending, error.message);
     }
   } finally {
+    redemptionCode = null;
     busy = false;
 
     document.querySelectorAll(
-      "[data-tab], #signout, #retrypending"
+      "[data-tab], #signout, #checkpending, #retrycode"
     ).forEach(element => {
       element.disabled = false;
     });
+
+    const retry =
+      document.getElementById("retrypending");
+
+    if (retry) {
+      retry.disabled =
+        pending.p_redeemed_cents > 0 &&
+        !/^[0-9]{6}$/.test(
+          document.getElementById("retrycode")
+            ?.value || ""
+        );
+    }
+
+    if (currentUser?.id !== userId) {
+      setTimeout(refreshSession, 0);
+    }
   }
 }
 
 function wireSignout() {
-  document.getElementById("signout")
-    .onclick = async () => {
-      if (busy) return;
+  const button =
+    document.getElementById("signout");
 
-      await stopScanner();
+  if (!button) return;
 
-      const { error } = await db.auth.signOut();
+  button.onclick = async () => {
+    if (busy) return;
 
-      if (error) {
-        alert(error.message);
-        return;
-      }
+    clearRedemptionCode();
+    await stopScanner();
 
-      currentUser = null;
-      isStaff = false;
-      customer = null;
-      currentTab = "rewards";
-      registerMode = false;
+    const { error } = await db.auth.signOut();
 
-      render();
-    };
+    if (error) {
+      alert(error.message);
+      return;
+    }
+
+    currentUser = null;
+    isStaff = false;
+    customer = null;
+    currentTab = "rewards";
+    registerMode = false;
+
+    render();
+  };
 }
 
 async function render() {
   if (busy) return;
 
   const version = ++renderVersion;
+
+  clearInterval(codeTimer);
+  codeTimer = null;
 
   await stopScanner();
 
@@ -1004,6 +1569,7 @@ async function render() {
   }
 
   staffTab.hidden = !isStaff;
+
   staffTab.style.display =
     isStaff ? "" : "none";
 
@@ -1031,7 +1597,14 @@ async function refreshSession() {
     return;
   }
 
-  currentUser = data.session?.user || null;
+  const nextUser = data.session?.user || null;
+
+  if (currentUser?.id !== nextUser?.id) {
+    clearRedemptionCode();
+    customer = null;
+  }
+
+  currentUser = nextUser;
 
   await checkStaff();
 
@@ -1057,11 +1630,17 @@ db.auth.onAuthStateChange((_event, session) => {
 
   if (nextUser?.id === currentUser?.id) return;
 
+  clearRedemptionCode();
+
   currentUser = nextUser;
   isStaff = false;
+  customer = null;
   renderVersion++;
 
-  setTimeout(refreshSession, 0);
+  if (!busy) {
+    view.textContent = "Loading...";
+    setTimeout(refreshSession, 0);
+  }
 });
 
 refreshSession();
