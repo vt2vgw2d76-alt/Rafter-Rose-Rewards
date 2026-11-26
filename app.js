@@ -1,21 +1,353 @@
-// Rafter & Rose prototype. No production authentication or database connection.
-const DEMO_CUSTOMER='RR-DEMO-0001';
-let state={tab:'rewards',balance:8.50,earned:24,history:[],camera:null,scanTimer:null,found:false};
-const view=document.getElementById('view');
-const money=n=>'$'+Number(n).toFixed(2);
-const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function stopCamera(){if(state.scanTimer){clearInterval(state.scanTimer);state.scanTimer=null}if(state.camera){state.camera.getTracks().forEach(t=>t.stop());state.camera=null}}
-function render(){stopCamera();document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===state.tab));
-if(state.tab==='rewards')view.innerHTML=`<section class="card hero"><small>YOUR REWARD DOLLARS</small><div class="balance">${money(state.balance)}</div><p>Earn 5% back on eligible spending after reward redemption.</p></section><section class="card"><h2>Your rewards card</h2><p class="muted">Show this code to our team at checkout.</p><img class="qr" id="qr" alt="Demo customer QR code"><p style="text-align:center" class="mini">${DEMO_CUSTOMER}</p><div class="notice">Demo only — this QR identifies a sample account, not a real customer. Balances reset when this page reloads.</div></section><section class="card"><h2>Recent activity</h2>${state.history.length?state.history.map(h=>`<p>${esc(h)}</p>`).join(''):'<p class="muted">Your reward transactions will appear here.</p>'}</section>`;
-else if(state.tab==='events')view.innerHTML=`<section class="card"><h2>What's on at Rafter & Rose</h2><p>From laneway dinners to special café events, there’s always something lovely coming up.</p><div class="notice">Event listings and ticket links can be added once the café provides current event details.</div><button class="secondary" onclick="window.location.href='mailto:?subject=Rafter%20%26%20Rose%20events%20enquiry'">Ask about events</button></section>`;
-else if(state.tab==='cakes')view.innerHTML=`<section class="card"><h2>Cake enquiries</h2><p class="muted">Tell us what you're celebrating. This demo opens an email draft; it does not submit an order.</p><form id="cakeform"><label>Your name</label><input name="name" required maxlength="80"><label>Your email</label><input name="email" type="email" required><label>Preferred date</label><input name="date" type="date" required><label>Cake details</label><textarea name="details" required placeholder="Flavour, serves, design ideas, dietary needs…"></textarea><button class="bigbtn">Prepare enquiry email</button></form></section>`;
-else if(state.tab==='hire')view.innerHTML=`<section class="card"><h2>Celebrate with us</h2><p>Private events, special moments and our garden café atmosphere.</p><p class="muted">Tell us about your event. This demo opens an email draft; it does not submit an enquiry.</p><form id="hireform"><label>Your name</label><input name="name" required maxlength="80"><label>Your email</label><input name="email" type="email" required><label>Event date</label><input name="date" type="date" required><label>Guests and event details</label><textarea name="details" required placeholder="Occasion, approximate guests, catering preferences…"></textarea><button class="bigbtn">Prepare enquiry email</button></form></section>`;
-else view.innerHTML=`<section class="card"><div class="row"><h2>Staff scanner</h2><span class="pill">DEMO ONLY</span></div><div class="notice">This is a training simulation, not a secure staff portal. Do not use for actual transactions or enter real customer details.</div><p>Use a separate iPhone to scan a customer's QR code, or use the demo account below.</p><button id="startscan">Open iPhone camera</button> <button class="secondary" id="demofind">Load demo customer</button><div id="scanbox"></div><div id="checkout">${state.found?checkoutHTML():''}</div></section>`;
-if(state.tab==='rewards'){const img=document.getElementById('qr');img.src='https://api.qrserver.com/v1/create-qr-code/?size=240x240&data='+encodeURIComponent(DEMO_CUSTOMER);img.onerror=()=>{img.style.display='none';img.insertAdjacentHTML('afterend','<p class="notice">QR preview unavailable offline. Use the demo customer button in Staff demo.</p>')}}
-if(state.tab==='staff'){document.getElementById('demofind').onclick=()=>{state.found=true;render()};document.getElementById('startscan').onclick=startScan;wireCheckout()}
-for(const id of ['cakeform','hireform']){const f=document.getElementById(id);if(f)f.onsubmit=e=>{e.preventDefault();const d=new FormData(f);const subject=id==='cakeform'?'Cake enquiry':'Private hire enquiry';const body=`Name: ${d.get('name')}\nEmail: ${d.get('email')}\nDate: ${d.get('date')}\nDetails: ${d.get('details')}`;window.location.href=`mailto:?subject=${encodeURIComponent('Rafter & Rose — '+subject)}&body=${encodeURIComponent(body)}`}}
+
+const SUPABASE_URL = "https://wufsozpzqnfekctvudfo.supabase.co";
+const SUPABASE_KEY = "sb_publishable_UkwW-P2AMMOIUkNKwoO9DQ_bpdMTa1Q";
+
+const db = window.supabase.createClient(
+  SUPABASE_URL,
+  SUPABASE_KEY
+);
+
+const view = document.getElementById("view");
+
+let currentUser = null;
+let currentTab = "rewards";
+let registerMode = false;
+let renderVersion = 0;
+
+const money = cents =>
+  "$" + (Number(cents) / 100).toFixed(2);
+
+const esc = value =>
+  String(value ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  }[c]));
+
+function showAuth() {
+  view.innerHTML = `
+    <section class="card hero">
+      <h2>Little moments, lovely rewards.</h2>
+      <p>Earn 5% back on eligible spending
+      at Rafter & Rose.</p>
+    </section>
+
+    <section class="card">
+      <h2>${registerMode
+        ? "Join our rewards"
+        : "Welcome back"}</h2>
+
+      <form id="authform">
+        ${registerMode ? `
+          <label>Your name</label>
+          <input name="name"
+            autocomplete="name" required>
+        ` : ""}
+
+        <label>Email address</label>
+        <input name="email" type="email"
+          autocomplete="email" required>
+
+        <label>Password</label>
+        <input name="password" type="password"
+          minlength="8"
+          autocomplete="${registerMode
+            ? "new-password"
+            : "current-password"}" required>
+
+        <button class="bigbtn" type="submit">
+          ${registerMode
+            ? "Create account"
+            : "Sign in"}
+        </button>
+      </form>
+
+      <button class="secondary bigbtn" id="toggleauth">
+        ${registerMode
+          ? "Already a member? Sign in"
+          : "New here? Join rewards"}
+      </button>
+
+      <p id="authmessage" role="status"
+        class="muted"></p>
+    </section>
+  `;
+
+  document.getElementById("toggleauth").onclick = () => {
+    registerMode = !registerMode;
+    showAuth();
+  };
+
+  document.getElementById("authform").onsubmit =
+    async event => {
+      event.preventDefault();
+
+      const form = event.currentTarget;
+      const data = new FormData(form);
+      const button = form.querySelector("button");
+      const message =
+        document.getElementById("authmessage");
+
+      button.disabled = true;
+      message.textContent = "Please wait...";
+
+      try {
+        let response;
+
+        if (registerMode) {
+          response = await db.auth.signUp({
+            email: data.get("email"),
+            password: data.get("password"),
+            options: {
+              data: {
+                full_name: data.get("name")
+              },
+              emailRedirectTo:
+                "https://rewards.rafterandrose.com/"
+            }
+          });
+        } else {
+          response =
+            await db.auth.signInWithPassword({
+              email: data.get("email"),
+              password: data.get("password")
+            });
+        }
+
+        if (response.error) {
+          message.textContent = response.error.message;
+        } else if (registerMode && !response.data.session) {
+          message.textContent =
+            "Please check your email to confirm your account.";
+        } else {
+          await refreshSession();
+        }
+      } catch (error) {
+        message.textContent =
+          "Something went wrong. Please try again.";
+      } finally {
+        button.disabled = false;
+      }
+    };
 }
-function checkoutHTML(){return `<hr class="divider"><h3>Demo customer found</h3><p>${DEMO_CUSTOMER} · Available: <b>${money(state.balance)}</b></p><label>Eligible purchase total ($)</label><input id="purchase" inputmode="decimal" type="number" min="0.01" step="0.01" value="20.00"><label>Rewards to redeem ($)</label><input id="redeem" inputmode="decimal" type="number" min="0" step="0.01" value="0"><div class="notice" id="calculation"></div><button class="bigbtn" id="confirm">Simulate transaction</button>`}
-function wireCheckout(){const purchase=document.getElementById('purchase');if(!purchase)return;const redeem=document.getElementById('redeem'),calc=document.getElementById('calculation');function compute(){const p=Number(purchase.value),r=Number(redeem.value);const valid=Number.isFinite(p)&&p>0&&Number.isFinite(r)&&r>=0&&r<=p&&r<=state.balance;calc.textContent=valid?`Pay ${money(p-r)} · Earn ${money(Math.round((p-r)*.05*100)/100)} (5% after redemption)`:'Enter a valid purchase and redemption no greater than the balance or purchase.';document.getElementById('confirm').disabled=!valid;return valid?{p,r,earn:Math.round((p-r)*5)/100}:null}purchase.oninput=redeem.oninput=compute;compute();document.getElementById('confirm').onclick=()=>{const x=compute();if(!x)return;state.balance=Math.round((state.balance-x.r+x.earn)*100)/100;state.history.unshift(`Demo purchase ${money(x.p)} · Redeemed ${money(x.r)} · Earned ${money(x.earn)}`);alert('Simulation recorded. No real reward was awarded.');render()}}
-async function startScan(){const box=document.getElementById('scanbox');if(!navigator.mediaDevices?.getUserMedia){box.innerHTML='<p class="notice">Camera unavailable here. Try Safari over HTTPS, or use Load demo customer.</p>';return}try{const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false});state.camera=stream;box.innerHTML='<video autoplay playsinline muted id="camera"></video><p class="mini">Point the camera at the demo QR code on another screen.</p>';document.getElementById('camera').srcObject=stream;if('BarcodeDetector' in window){const detector=new BarcodeDetector({formats:['qr_code']});let busy=false;state.scanTimer=setInterval(async()=>{if(busy)return;busy=true;try{const results=await detector.detect(document.getElementById('camera'));if(results.length){if(results[0].rawValue===DEMO_CUSTOMER){state.found=true;render()}else box.insertAdjacentHTML('beforeend','<p class="notice">Unrecognised code — demo account only.</p>')}}catch{}busy=false},450)}else box.insertAdjacentHTML('beforeend','<p class="notice">This browser does not support the demo QR detector. Use Load demo customer. A production scanner will use a cross-browser scanning library.</p>')}catch(e){box.innerHTML='<p class="notice">Camera permission denied or unavailable. Allow camera access in Safari settings, or use Load demo customer.</p>'}}
-document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{state.tab=b.dataset.tab;render()});render();
+
+async function showRewards() {
+  if (!currentUser) {
+    showAuth();
+    return;
+  }
+
+  const version = renderVersion;
+  const userId = currentUser.id;
+
+  view.innerHTML = `
+    <section class="card">
+      <p>Loading your rewards...</p>
+    </section>
+  `;
+
+  const [profile, wallet, history] = await Promise.all([
+    db.from("profiles")
+      .select("full_name")
+      .eq("id", userId)
+      .single(),
+
+    db.from("loyalty_wallets")
+      .select("balance_cents")
+      .eq("user_id", userId)
+      .single(),
+
+    db.from("loyalty_transactions")
+      .select(
+        "purchase_cents,earned_cents,redeemed_cents,created_at"
+      )
+      .eq("customer_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(20)
+  ]);
+
+  if (version !== renderVersion ||
+      currentUser?.id !== userId) return;
+
+  if (profile.error || wallet.error || history.error) {
+    view.innerHTML = `
+      <section class="card">
+        <h2>Rewards unavailable</h2>
+        <p>We couldn't load your account.
+        Please try again.</p>
+        <button id="retry">Try again</button>
+        <button class="secondary" id="signout">
+          Sign out
+        </button>
+      </section>
+    `;
+
+    document.getElementById("retry").onclick = render;
+    wireSignout();
+    return;
+  }
+
+  const name =
+    profile.data.full_name || "lovely";
+
+  view.innerHTML = `
+    <section class="card hero">
+      <p>Hello, ${esc(name)}!</p>
+      <small>YOUR REWARD DOLLARS</small>
+
+      <div class="balance">
+        ${money(wallet.data.balance_cents)}
+      </div>
+
+      <p>Earn 5% back on eligible spending
+      after reward redemption.</p>
+    </section>
+
+    <section class="card">
+      <h2>Your rewards card</h2>
+      <p class="muted">
+        Your digital rewards card is being prepared.
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>Recent activity</h2>
+
+      ${history.data.length
+        ? history.data.map(t => `
+          <p>
+            <strong>
+              ${new Date(t.created_at)
+                .toLocaleDateString("en-AU")}
+            </strong><br>
+            Purchase: ${money(t.purchase_cents)}<br>
+            Earned: ${money(t.earned_cents)}<br>
+            Redeemed: ${money(t.redeemed_cents)}
+          </p>
+          <hr class="divider">
+        `).join("")
+        : `<p class="muted">
+            Your reward transactions will appear here.
+           </p>`
+      }
+
+      <button class="secondary bigbtn" id="refresh">
+        Refresh balance
+      </button>
+    </section>
+
+    <button class="secondary bigbtn" id="signout">
+      Sign out
+    </button>
+  `;
+
+  document.getElementById("refresh").onclick = render;
+  wireSignout();
+}
+
+function wireSignout() {
+  document.getElementById("signout").onclick =
+    async () => {
+      const { error } = await db.auth.signOut();
+
+      if (error) {
+        alert(error.message);
+        return;
+      }
+
+      currentUser = null;
+      currentTab = "rewards";
+      registerMode = false;
+      render();
+    };
+}
+
+function render() {
+  renderVersion++;
+
+  document.querySelectorAll("[data-tab]")
+    .forEach(button => {
+      button.classList.toggle(
+        "active",
+        button.dataset.tab === currentTab
+      );
+    });
+
+  if (currentTab === "rewards") {
+    showRewards();
+  } else if (currentTab === "events") {
+    view.innerHTML = `
+      <section class="card">
+        <h2>What's on at Rafter & Rose</h2>
+        <p>Discover our upcoming events and
+        little moments worth celebrating.</p>
+        <button class="bigbtn"
+          onclick="location.href='https://rafterandrose.com/events.html'">
+          Explore events
+        </button>
+      </section>
+    `;
+  } else if (currentTab === "cakes") {
+    view.innerHTML = `
+      <section class="card">
+        <h2>Cake orders</h2>
+        <p>Something sweet for your special occasion.</p>
+        <button class="bigbtn"
+          onclick="location.href='https://rafterandrose.com/cakes.html'">
+          Explore cakes
+        </button>
+      </section>
+    `;
+  } else if (currentTab === "hire") {
+    view.innerHTML = `
+      <section class="card">
+        <h2>Celebrate with us</h2>
+        <p>Make our little garden café yours.</p>
+        <button class="bigbtn"
+          onclick="location.href='https://rafterandrose.com/private-hire.html'">
+          Explore private hire
+        </button>
+      </section>
+    `;
+  } else if (currentTab === "staff") {
+    view.innerHTML = `
+      <section class="card">
+        <h2>Staff portal</h2>
+        <p>Staff checkout is not yet enabled.</p>
+        <p class="muted">
+          Internal setup and testing in progress.
+        </p>
+      </section>
+    `;
+  }
+}
+
+async function refreshSession() {
+  const { data, error } = await db.auth.getSession();
+
+  if (error) {
+    view.textContent = error.message;
+    return;
+  }
+
+  currentUser = data.session?.user || null;
+  render();
+}
+
+document.querySelectorAll("[data-tab]")
+  .forEach(button => {
+    button.onclick = () => {
+      currentTab = button.dataset.tab;
+      render();
+    };
+  });
+
+db.auth.onAuthStateChange((_event, session) => {
+  currentUser = session?.user || null;
+  renderVersion++;
+  setTimeout(render, 0);
+});
+
+refreshSession();
