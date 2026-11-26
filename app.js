@@ -1229,6 +1229,18 @@ function showPending(
           Retry same transaction
         </button>
 
+        <details>
+          <summary>Manager cancellation</summary>
+          <p class="muted">Only cancel after reconciling the original payment and rewards discount in Lightspeed. Completed transactions must be reversed instead.</p>
+          <form id="cancelpendingform">
+            <label for="cancelreason">Cancellation reason</label>
+            <textarea id="cancelreason" required maxlength="500"></textarea>
+            <label for="cancelpin">Manager PIN</label>
+            <input id="cancelpin" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="off" required>
+            <label><input id="cancelpos" type="checkbox" style="width:auto" required> Lightspeed reconciled</label>
+            <button class="secondary bigbtn" type="submit">Permanently cancel original reference</button>
+          </form>
+        </details>
         <p id="pendingmessage"
           class="muted" role="status"></p>
 
@@ -1242,6 +1254,8 @@ function showPending(
 
   document.getElementById("checkpending")
     .onclick = () => checkPending(pending);
+
+  document.getElementById("cancelpendingform").onsubmit = event => cancelPending(event, pending);
 
   if (needsCode) {
     document.getElementById("retrycode")
@@ -1302,46 +1316,29 @@ async function checkPending(pending) {
     "Checking the original reference...";
 
   try {
-    const { data, error } = await db
-      .from("loyalty_transactions")
-      .select(
-        "id,customer_id,staff_id,purchase_cents,redeemed_cents,earned_cents,balance_after_cents"
-      )
-      .eq("id", pending.p_transaction_id)
-      .maybeSingle();
-
-    if (version !== renderVersion ||
-        currentUser?.id !== userId) return;
-
-    if (error) throw new Error(error.message);
-
-    if (!data) {
-      message.textContent =
-        "No completed transaction found. This does not rule out a request still being processed. Use the original reference when retrying.";
+    const { data, error } = await db.rpc(
+      "get_loyalty_transaction_status", pending
+    );
+    if (version !== renderVersion || currentUser?.id !== userId) return;
+    if (error || data?.success !== true) {
+      throw new Error(error?.message || data?.error || "Unable to check status.");
+    }
+    if (data.transaction_id !== pending.p_transaction_id) {
+      throw new Error("Transaction reference mismatch.");
+    }
+    if (data.status === "unresolved") {
+      message.textContent = "No definitive record. Retry only the original reference, or ask a manager to cancel after checking Lightspeed.";
       return;
     }
-
-    if (
-      data.customer_id !== pending.p_customer_id ||
-      data.staff_id !== userId ||
-      data.purchase_cents !==
-        pending.p_purchase_cents ||
-      data.redeemed_cents !==
-        pending.p_redeemed_cents
-    ) {
-      message.textContent =
-        "Transaction details do not match. Ask a manager.";
-      return;
+    if (!["completed", "cancelled", "reversed"].includes(data.status) ||
+        data.customer_id !== pending.p_customer_id ||
+        data.purchase_cents !== pending.p_purchase_cents ||
+        data.redeemed_cents !== pending.p_redeemed_cents) {
+      throw new Error("Unexpected transaction status or details.");
     }
-
     localStorage.removeItem(key);
-
-    showTransactionSuccess({
-      earned_cents: data.earned_cents,
-      redeemed_cents: data.redeemed_cents,
-      balance_cents: data.balance_after_cents,
-      already_processed: true
-    });
+    if (data.status === "completed") showTransactionSuccess(data);
+    else showResolvedPending(data.status);
 
   } catch (error) {
     if (version === renderVersion) {
@@ -1364,6 +1361,46 @@ async function checkPending(pending) {
           code?.value || ""
         );
     }
+  }
+}
+
+function showResolvedPending(status) {
+  view.innerHTML = `<section class="card"><h2>Transaction ${esc(status)}</h2><p>The server confirmed this reference is ${esc(status)}. Do not retry it or repeat the original payment.</p><button id="nextcustomer" class="bigbtn">Next customer</button><button id="signout" class="secondary bigbtn">Sign out</button></section>`;
+  document.getElementById("nextcustomer").onclick = render;
+  wireSignout();
+}
+
+async function cancelPending(event, pending) {
+  event.preventDefault();
+  if (busy || !isStaff || !currentUser) return;
+  const userId = currentUser.id;
+  const version = renderVersion;
+  const key = pendingKey();
+  const form = event.currentTarget;
+  const pin = form.querySelector("#cancelpin");
+  const reason = form.querySelector("#cancelreason").value.trim();
+  const confirmed = form.querySelector("#cancelpos").checked;
+  if (!reason || !confirmed || !/^[0-9]{6}$/.test(pin.value)) return;
+  if (!window.confirm("Permanently cancel this rewards reference?")) { pin.value = ""; return; }
+  const args = {...pending, p_original_staff_id:userId, p_reason:reason, p_pos_confirmed:confirmed, p_manager_pin:pin.value};
+  pin.value = "";
+  busy = true;
+  const button = form.querySelector("button");
+  button.disabled = true;
+  const message = document.getElementById("pendingmessage");
+  try {
+    const {data,error} = await db.rpc("cancel_loyalty_transaction", args);
+    if (version !== renderVersion || currentUser?.id !== userId) return;
+    if (error || data?.success !== true || data.transaction_id !== pending.p_transaction_id) throw new Error(error?.message || data?.error || "Cancellation not confirmed.");
+    localStorage.removeItem(key);
+    showResolvedPending("cancelled");
+  } catch (error) {
+    if (version === renderVersion && currentUser?.id === userId) message.textContent = error.message + " Check the original transaction status before proceeding.";
+  } finally {
+    args.p_manager_pin = "";
+    busy = false;
+    button.disabled = false;
+    if (currentUser?.id !== userId) setTimeout(refreshSession, 0);
   }
 }
 
@@ -1459,6 +1496,11 @@ async function processPending(
     }
 
     if (data.success === false) {
+      if ((data.cancelled === true || data.reversed === true) && data.transaction_id === pending.p_transaction_id) {
+        localStorage.removeItem(key);
+        showResolvedPending(data.cancelled ? "cancelled" : "reversed");
+        return;
+      }
       let message =
         data.error || "Transaction rejected.";
 
