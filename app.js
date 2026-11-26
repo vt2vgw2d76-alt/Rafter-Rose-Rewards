@@ -1,9 +1,9 @@
 
 const SUPABASE_URL =
   "https://wufsozpzqnfekctvudfo.supabase.co";
-const SUPABASE_KEY =
-  "sb_publishable_UkwW-P2AMO IUkNKwoO9DQ_bpdMTa1Q"
-    .replace(" ", "");
+
+const SUPABASE_KEY = "sb_publishable_UkwW-P2AMMOIUkNKwoO9DQ_bpdMTa1Q";
+
 
 const db = window.supabase.createClient(
   SUPABASE_URL,
