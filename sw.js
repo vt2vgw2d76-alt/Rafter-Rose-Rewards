@@ -1,83 +1,108 @@
 
-const CACHE = 'rr-rewards-live-v2';
+const CACHE_NAME = "rr-rewards-live-v3";
 
 const ASSETS = [
-  './',
-  './index.html',
-  './app.js',
-  './manifest.webmanifest',
-  './icon.png',
-  './icon-512.png'
+  "./",
+  "./index.html",
+  "./app.js",
+  "./manifest.webmanifest",
+  "./icon.png",
+  "./icon-512.png"
 ];
 
-self.addEventListener('install', event => {
+const ALLOWED_URLS = new Set(
+  ASSETS.map(
+    asset => new URL(
+      asset,
+      self.registration.scope
+    ).href
+  )
+);
+
+self.addEventListener("install", event => {
   event.waitUntil(
-    caches.open(CACHE)
-      .then(cache => cache.addAll(ASSETS))
-      .then(() => self.skipWaiting())
+    (async () => {
+      const cache = await caches.open(CACHE_NAME);
+
+      await cache.addAll(
+        ASSETS.map(
+          asset => new Request(
+            asset,
+            { cache: "reload" }
+          )
+        )
+      );
+
+      await self.skipWaiting();
+    })()
   );
 });
 
-self.addEventListener('activate', event => {
+self.addEventListener("activate", event => {
   event.waitUntil(
-    caches.keys()
-      .then(keys => Promise.all(
+    (async () => {
+      const keys = await caches.keys();
+
+      await Promise.all(
         keys
-          .filter(key =>
-            key.startsWith('rr-rewards-') &&
-            key !== CACHE
+          .filter(
+            key =>
+              key.startsWith("rr-rewards-") &&
+              key !== CACHE_NAME
           )
           .map(key => caches.delete(key))
-      ))
-      .then(() => self.clients.claim())
+      );
+
+      await self.clients.claim();
+    })()
   );
 });
 
-self.addEventListener('fetch', event => {
-  const url = new URL(event.request.url);
+self.addEventListener("fetch", event => {
+  const request = event.request;
+  const url = new URL(request.url);
 
   if (
-    event.request.method !== 'GET' ||
+    request.method !== "GET" ||
     url.origin !== self.location.origin ||
     url.search ||
-    url.pathname.startsWith('/auth/') ||
-    url.pathname.startsWith('/rest/')
-  ) return;
-
-  const allowed = ASSETS.some(asset =>
-    new URL(asset, self.registration.scope)
-      .pathname === url.pathname
-  );
-
-  if (!allowed) return;
+    !ALLOWED_URLS.has(url.href)
+  ) {
+    return;
+  }
 
   event.respondWith(
-    fetch(event.request, { cache: 'no-cache' })
-      .then(async response => {
+    (async () => {
+      const cache = await caches.open(CACHE_NAME);
+
+      try {
+        const response = await fetch(
+          request,
+          { cache: "no-cache" }
+        );
+
         if (response.ok) {
-          const cache = await caches.open(CACHE);
           await cache.put(
-            event.request,
+            request,
             response.clone()
           );
         }
 
         return response;
-      })
-      .catch(async () => {
-        const cached = await caches.match(
-          event.request
-        );
+
+      } catch (error) {
+        const cached = await cache.match(request);
 
         return cached || new Response(
-          'Please reconnect to the internet.',
+          "Please reconnect to the internet.",
           {
             status: 503,
             headers: {
-              'Content-Type': 'text/plain'
+              "Content-Type": "text/plain"
             }
           }
         );
-      })
+      }
+    })()
   );
 });
